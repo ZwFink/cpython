@@ -175,6 +175,9 @@ _PyInterpreterFrame *AllocateFrameToMigrate(size_t size) {
 }
 
 PyObject *deepcopy_object(PyObject *obj) {
+    if(NULL == obj) {
+        return NULL;
+    }
     PyObject *copy = PyImport_ImportModule("copy");
     PyObject *deepcopy = PyObject_GetAttrString(copy, "deepcopy");
     PyObject *copy_obj = PyObject_CallFunction(deepcopy, "O", obj);
@@ -221,10 +224,12 @@ static PyObject *copy_frame(PyObject *self, PyObject *args) {
     _PyInterpreterFrame *stack_frame = AllocateFrameToMigrate(copy_code_obj->co_framesize);
     new_frame->f_frame = stack_frame;
     for(int i = 0; i < nlocals; i++) {
-        new_frame->f_frame->localsplus[i] = to_copy->localsplus[i];
+        PyObject *local = (PyObject*) to_copy->localsplus[i].bits;
+        PyObject *local_copy = deepcopy_object(local);
+        new_frame->f_frame->localsplus[i].bits = (uintptr_t)local_copy;
     }
     new_frame->f_frame->owner = to_copy->owner;
-    new_frame->f_frame->previous = to_copy;
+    new_frame->f_frame->previous = NULL;
     new_frame->f_frame->f_funcobj = deepcopy_object(to_copy->f_funcobj);
     PyObject *executable_copy = deepcopy_object((PyObject*) to_copy->f_executable.bits);
     new_frame->f_frame->f_executable.bits = (uintptr_t)executable_copy;
@@ -353,7 +358,7 @@ static PyObject *_copy_run_frame_from_capsule(PyObject *capsule) {
     new_frame->f_frame->f_locals = to_copy->f_locals;
     new_frame->f_frame->frame_obj = new_frame;
     new_frame->f_frame->stackpointer = new_frame->f_frame->localsplus + nlocals;
-    new_frame->f_frame->instr_ptr = copy_code_obj->co_code_adaptive;// + offset;
+    new_frame->f_frame->instr_ptr = copy_code_obj->co_code_adaptive + offset;
 
     PyObject *res = PyEval_EvalFrame(new_frame);
     Py_DECREF(code);
@@ -373,126 +378,8 @@ static PyObject *run_frame(PyObject *self, PyObject *args) {
     return res;
 }
 
-static PyObject *copy_and_run_frame_working(PyObject *self, PyObject *args) {
-    PyObject *copy = PyImport_ImportModule("copy");
-    PyObject *deepcopy = PyObject_GetAttrString(copy, "deepcopy");
-    struct _frame *frame = (struct frame*) PyEval_GetFrame();
-    struct _PyInterpreterFrame *frame_data = frame->f_frame;
-    PyThreadState *tstate = PyThreadState_Get();
-    PyCodeObject *code = PyFrame_GetCode(frame); //(PyCodeObject *)frame_data->f_executable.bits;
-    assert(code != NULL);
-    PyObject *copy_code = PyObject_CallFunction(deepcopy, "O", code);
-    PyCodeObject *copy_code_obj = (PyCodeObject *)copy_code;
-    int nlocals = copy_code_obj->co_nlocalsplus;
-    for(int i = 0; i < nlocals; i++) {
-        PyObject *name = PyTuple_GET_ITEM(copy_code_obj->co_localsplusnames, i);
-        PyObject *LocalFromFrame = (PyObject*) frame_data->localsplus[i].bits;
-        PyObject *repr = PyObject_Repr(LocalFromFrame);
-        // PySys_WriteStdout("Local %d: %s = %s\n", i, PyUnicode_AsUTF8(name), PyUnicode_AsUTF8(repr));
-        Py_DECREF(repr);
-
-    }
-
-    PyObject *FrameLocals = GetFrameLocalsFromFrame((PyObject*) frame_data);
-    PyObject *LocalCopy = PyDict_Copy(FrameLocals);
-
-    PyFrameObject *new_frame = PyFrame_New(tstate, (PyCodeObject*)copy_code,
-    frame_data->f_globals, LocalCopy);
-    _PyInterpreterFrame *stack_frame = _PyThreadState_PushFrame(tstate, copy_code_obj->co_framesize);
-    new_frame->f_frame = stack_frame;
-    for(int i = 0; i < nlocals; i++) {
-        new_frame->f_frame->localsplus[i] = frame_data->localsplus[i];
-    }
-    new_frame->f_frame->owner = frame_data->owner;
-    new_frame->f_frame->previous = frame_data;
-    new_frame->f_frame->f_funcobj = frame_data->f_funcobj;
-    new_frame->f_frame->f_executable = frame_data->f_executable;
-    new_frame->f_frame->f_globals = frame_data->f_globals;
-    new_frame->f_frame->f_builtins = frame_data->f_builtins;
-    new_frame->f_frame->f_locals = frame_data->f_locals;
-    new_frame->f_frame->frame_obj = new_frame;
-    new_frame->f_frame->stackpointer = new_frame->f_frame->localsplus + nlocals;
-    new_frame->f_frame->instr_ptr = copy_code_obj->co_code_adaptive;
-
-
-    PyObject *res = PyEval_EvalFrame(new_frame);
-    Py_DECREF(copy);
-    Py_DECREF(deepcopy);
-    Py_DECREF(copy_code);
-    Py_DECREF(code);
-    Py_DECREF(LocalCopy);
-    Py_DECREF(FrameLocals);
-
-    return res;
-}
-
-static PyObject* abcd(PyObject* self, PyObject* args) {
-    PySys_WriteStdout("hello world\n");
-    // create an int named 'x'
-    PyObject *x = PyLong_FromLong(10);
-
-    PyFrameObject* frame = PyEval_GetFrame();
-    PyObject *globs = PyFrame_GetGlobals(frame);
-    PyObject *locs = PyFrame_GetLocals(frame);
-
-    if(globs == locs) {
-        PySys_WriteStdout("Globals and Locals are same\n");
-    } else {
-        PySys_WriteStdout("Globals and Locals are different\n");
-    }
-
-    // add x to locals
-    PyDict_SetItem(locs, PyUnicode_FromString("x"), x);
-
-    PySys_WriteStdout("Globals are\n");
-    {
-    PyObject *key, *value;
-    Py_ssize_t pos = 0;
-    while (PyDict_Next(globs, &pos, &key, &value)) {
-        auto* key_str = PyObject_Str(key);
-        auto* value_str = PyObject_Str(value);
-        PySys_WriteStdout("key: %s, value: %s\n", PyUnicode_AsUTF8(key_str), PyUnicode_AsUTF8(value_str));
-        Py_DECREF(key_str);
-        Py_DECREF(value_str);
-
-    }
-    }
-
-    PySys_WriteStdout("\n\nLocals are\n");
-
-    PyObject *locals_only = PyDict_New();
-    while(1) {
-        PyObject *key, *value;
-        Py_ssize_t pos = 0;
-        while (PyDict_Next(locs, &pos, &key, &value)) {
-            if(PyDict_GetItem(globs, key) == NULL) {
-                PyDict_SetItem(locals_only, key, value);
-            }
-            PyObject *key_str = PyObject_Str(key);
-            PyObject *value_str = PyObject_Str(value);
-            PySys_WriteStdout("key: %s, value: %s\n", PyUnicode_AsUTF8(key_str), PyUnicode_AsUTF8(value_str));
-        }
-        break;
-    }
-
-    PySys_WriteStdout("Locals only are\n");
-    {
-    PyObject *key, *value;
-    Py_ssize_t pos = 0;
-    while (PyDict_Next(locals_only, &pos, &key, &value)) {
-        PyObject *key_str = PyObject_Str(key);
-        PyObject *value_str = PyObject_Str(value);
-        PySys_WriteStdout("key: %s, value: %s\n", PyUnicode_AsUTF8(key_str), PyUnicode_AsUTF8(value_str));
-    }
-    }
-
-    Py_DecRef(x);
-    Py_DecRef(locals_only);
-    Py_RETURN_NONE;
-}
 
 static PyMethodDef MyMethods[] = {
-    {"abcd", abcd, METH_NOARGS, "Prints 'hello world'"},
     {"copy_and_run_frame", copy_and_run_frame, METH_VARARGS, "Copy the current frame and run it"},
     {"copy_frame", copy_frame, METH_VARARGS, "Copy the current frame"},
     {"run_frame", run_frame, METH_VARARGS, "run the current frame"},
@@ -510,27 +397,3 @@ static struct PyModuleDef mymodule = {
 PyMODINIT_FUNC PyInit_mymodule(void) {
     return PyModule_Create(&mymodule);
 }
-
-// int main() {
-//     PyImport_AppendInittab("mymodule", PyInit_mymodule);
-//     Py_Initialize();
-
-//     PyRun_SimpleString(
-//         "import mymodule\n"
-//         "mymodule.abcd()\n"
-//     );
-
-//         // Simulate a Python-defined function by creating a new execution frame
-//     PyObject *globals = PyDict_New();
-//     PyObject *locals = PyDict_New();
-    
-//     // Run some simple Python code to call the C function inside a new frame
-//     // PyDict_SetItemString(globals, r__builtins__", PyEval_GetBuiltins());
-//     // PyRun_String("import mymodule\nmymodule.abcd()", Py_file_input, globals, locals);
-
-//     Py_Finalize();
-//     return 0;
-
-//     Py_Finalize();
-//     return 0;
-// }

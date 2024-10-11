@@ -2,6 +2,10 @@ import mymodule
 import sys
 calls = 0
 
+def do_run_frame(frm):
+    return_val = mymodule.run_frame(frm)
+    print('return_val = ', return_val)
+
 def fun1(c):
     global calls
     print("Running with calls == ", calls)
@@ -13,14 +17,22 @@ def fun1(c):
         print('Calling inner')
         frm_copy = mymodule.copy_frame()
         print('returning from outer')
-        print(frm_copy)
-        return_val = mymodule.run_frame(frm_copy)
-        print('return_val = ', return_val)
+        # return_val = mymodule.run_frame(frm_copy)
+        # print('return_val = ', return_val)
         x = 45
-        return
-    else:
+        print(x)
+        if calls == 1:
+            calls += 1
+            hidden_inner = 55
+            return frm_copy
+        x += 1
         print(f'inner, a={a}, b={b}, c={c}')
-        return 500
+        return x
 
-fun1(3)
+frm = fun1(13)
+do_run_frame(frm)
+do_run_frame(frm)
+do_run_frame(frm)
+do_run_frame(frm)
+
 
