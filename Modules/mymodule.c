@@ -1,5 +1,6 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
+#include <stdbool.h>
 
 typedef union _PyStackRef {
     uintptr_t bits;
@@ -45,6 +46,18 @@ typedef struct _PyInterpreterFrame {
 
 static inline _PyStackRef *_PyFrame_Stackbase(_PyInterpreterFrame *f) {
     return f->localsplus + ((PyCodeObject*)f->f_executable.bits)->co_nlocalsplus;
+}
+
+bool ThreadState_HasStackSpace(PyThreadState *state, int size) {
+    return state->datastack_top != NULL && size < state->datastack_limit - state->datastack_top;
+}
+_PyInterpreterFrame *ThreadState_PushFrame(PyThreadState *tstate, size_t size) {
+    if(!ThreadState_HasStackSpace(tstate, size)) {
+        return NULL;
+    }
+    _PyInterpreterFrame *top = (_PyInterpreterFrame*) tstate->datastack_top;
+    tstate->datastack_top += size;
+    return top;
 }
 
 void copy_stack(_PyInterpreterFrame *src, _PyInterpreterFrame *dest) {
@@ -123,13 +136,11 @@ void print_object_type_name(PyObject *obj) {
 
 PyAPI_FUNC(PyFrameObject *) PyFrame_New(PyThreadState *, PyCodeObject *,
                                         PyObject *, PyObject *);
-int PyFrame_FastToLocalsWithError(PyObject*);
-PyObject *_PyFrame_GetLocals(_PyInterpreterFrame *);
 
 PyObject *GetFrameLocalsFromFrame(PyObject *frame) {
-     _PyInterpreterFrame *current_frame = (_PyInterpreterFrame *)frame;
+    PyFrameObject *current_frame = (PyFrameObject *)frame;
 
-    PyObject *locals = _PyFrame_GetLocals(current_frame);
+    PyObject *locals = PyFrame_GetLocals(current_frame);
     if (locals == NULL) {
         return NULL;
     }
@@ -210,9 +221,14 @@ PyFrameObject *create_copied_frame(PyThreadState *tstate, _PyInterpreterFrame *t
 
     _PyInterpreterFrame *stack_frame;
     if (push_frame) {
-        stack_frame = _PyThreadState_PushFrame(tstate, copy_code_obj->co_framesize);
+        stack_frame = ThreadState_PushFrame(tstate, copy_code_obj->co_framesize);
     } else {
         stack_frame = AllocateFrameToMigrate(copy_code_obj->co_framesize);
+    }
+
+    if(stack_frame == NULL) {
+        PySys_WriteStderr("<MyModule>: Could not allocate memory for new frame\n");
+        return NULL;
     }
 
     new_frame->f_frame = stack_frame;
@@ -229,7 +245,7 @@ PyFrameObject *create_copied_frame(PyThreadState *tstate, _PyInterpreterFrame *t
     new_frame->f_frame->f_locals = to_copy->f_locals;
     new_frame->f_frame->frame_obj = new_frame;
     new_frame->f_frame->stackpointer = new_frame->f_frame->localsplus + nlocals;
-    new_frame->f_frame->instr_ptr = copy_code_obj->co_code_adaptive + offset;
+    new_frame->f_frame->instr_ptr = (_CodeUnit*) (copy_code_obj->co_code_adaptive + offset);
 
     if (copy_stack_flag) {
         copy_stack(to_copy, new_frame->f_frame);
@@ -247,7 +263,8 @@ static PyObject *copy_frame(PyObject *self, PyObject *args) {
     PyCodeObject *copy_code_obj = (PyCodeObject *)deepcopy_object((PyObject*)code);
 
     Py_ssize_t offset = get_instr_offset(frame) + 5 * sizeof(_CodeUnit);
-    PyObject *FrameLocals = GetFrameLocalsFromFrame((PyObject*)to_copy);
+    // PyObject *FrameLocals = GetFrameLocalsFromFrame((PyObject*)to_copy);
+    PyObject *FrameLocals = GetFrameLocalsFromFrame((PyObject*)frame);
     PyObject *LocalCopy = PyDict_Copy(FrameLocals);
 
     PyFrameObject *new_frame = create_copied_frame(tstate, to_copy, copy_code_obj, LocalCopy, offset, 0, 1, 0, 1);
@@ -269,7 +286,7 @@ static PyObject *copy_and_run_frame(PyObject *self, PyObject *args) {
     PyCodeObject *copy_code_obj = (PyCodeObject *)deepcopy_object((PyObject*)code);
 
     Py_ssize_t offset = get_instr_offset(frame) + 5 * sizeof(_CodeUnit);
-    PyObject *FrameLocals = GetFrameLocalsFromFrame((PyObject*)to_copy);
+    PyObject *FrameLocals = GetFrameLocalsFromFrame((PyObject*)frame);
     PyObject *LocalCopy = PyDict_Copy(FrameLocals);
 
     PyFrameObject *new_frame = create_copied_frame(tstate, to_copy, copy_code_obj, LocalCopy, offset, 1, 0, 1, 1);
@@ -301,7 +318,7 @@ static PyObject *_copy_run_frame_from_capsule(PyObject *capsule) {
     assert(code != NULL);
     PyCodeObject *copy_code_obj = (PyCodeObject *)deepcopy_object((PyObject*)code);
 
-    PyObject *FrameLocals = GetFrameLocalsFromFrame((PyObject*)to_copy);
+    PyObject *FrameLocals = GetFrameLocalsFromFrame((PyObject*)frame);
     PyObject *LocalCopy = PyDict_Copy(FrameLocals);
 
     PyFrameObject *new_frame = create_copied_frame(tstate, to_copy, copy_code_obj, LocalCopy, offset, 1, 0, 1, 0);
